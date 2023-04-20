@@ -1,0 +1,1 @@
+g++ -o app main.cpp service.cpp utility.cpp
