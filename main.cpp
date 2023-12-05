@@ -5,6 +5,7 @@
 #include "utility.h"
 #include "queue"
 #include "climits"
+#include "thread"
 
 using namespace std;
 
@@ -18,7 +19,8 @@ int numOfRequests;            // num of requests received for scheduling
 int initializeServicesAndWorkerThreads();
 void getRequestsForScheduling();
 void assignRequestToService();
-void performProcessScheduling();
+void performProcessSchedulingWithThreads();
+void performProcessSchedulingForService(int serviceNo);
 pair<WorkerThread, bool> mapRequestToThread(WorkerThread threads[], int n, Request request);
 void displayScheduleDetails(int serviceNo, vector<Request> schedule, vector<Request> rejectedRequestsList);
 void calculateWaitingAndTurnAroundTimeForRequest(Request &request);
@@ -30,7 +32,7 @@ int main()
     {
         getRequestsForScheduling();
         assignRequestToService();
-        performProcessScheduling();
+        performProcessSchedulingWithThreads();
     }
     return 0;
 }
@@ -153,12 +155,33 @@ void assignRequestToService()
     }
 }
 
+// Function to perform process scheduling using multithreading
+void performProcessSchedulingWithThreads()
+{
+    // Create a vector to store thread objects
+    vector<thread> threads;
+
+    // Loop through each service and spawn a thread for scheduling
+    for (int i = 1; i <= numOfServices; i++)
+    {
+        // Using a lambda function to capture the service number
+        threads.emplace_back([i]()
+                             { performProcessSchedulingForService(i); });
+    }
+
+    // Wait for all threads to finish
+    for (auto &thread : threads)
+    {
+        thread.join();
+    }
+}
+
 /**
  * @brief Perform request scheduling for each server
  * monitors the waiting and rejected requests for each
  * server separately
  */
-void performProcessScheduling()
+void performProcessSchedulingForService(int serviceNo)
 {
     Request request;
     WorkerThread thread;
@@ -170,86 +193,83 @@ void performProcessScheduling()
     int newResourcesObtained;
     int waitingTime;
 
-    for (int i = 1; i <= numOfServices; i++)
+    rejectedRequests.clear();
+    schedule.clear();
+    displayInConsole(newLine + serviceLabel + emptySpace + to_string(serviceNo));
+
+    if (services[serviceNo]->isRequestQueueEmpty())
     {
-        rejectedRequests.clear();
-        schedule.clear();
-        displayInConsole(newLine + serviceLabel + emptySpace + to_string(i));
+        displayInConsole(noRequestToSchedule);
+        return; // chec
+    }
 
-        if (services[i]->isRequestQueueEmpty())
+    while (!services[serviceNo]->isRequestQueueEmpty())
+    {
+        request = services[serviceNo]->removeRequestFromQueueFront(); // getting the request from queue front for scheduling
+        if (request.resourcesRequired > services[serviceNo]->getResourcesInfo().first)
         {
-            displayInConsole(noRequestToSchedule);
-            continue;
+            rejectedRequests.push_back(request); // resource requirement can't be satisfied so request is rejected
         }
-
-        while (!services[i]->isRequestQueueEmpty())
+        else
         {
-            request = services[i]->removeRequestFromQueueFront(); // getting the request from queue front for scheduling
-            if (request.resourcesRequired > services[i]->getResourcesInfo().first)
+            mappingStatus = mapRequestToThread(services[serviceNo]->threads, services[serviceNo]->getNumOfWorkerThreads(), request); // contains the mapped thread and waiting status
+            thread = mappingStatus.first;
+            isWaiting = mappingStatus.second;
+            services[serviceNo]->updateScheduleTable(request.requestNo, thread.threadNo); // schedule table is updated
+            if (isWaiting == false)
             {
-                rejectedRequests.push_back(request); // resource requirement can't be satisfied so request is rejected
+                // no wait request can be scheduled
+                request.resourcesObtained = request.resourcesRequired;
+                calculateWaitingAndTurnAroundTimeForRequest(request);
+                schedule.push_back(request);
+                services[serviceNo]->releaseResources(thread.threadNo, request.resourcesObtained);
+                services[serviceNo]->increaseAvailableResourcesBy(request.resourcesObtained);
+            }
+            else if (isWaiting)
+            {
+                // request need to wait till required resources become available
+                request.resourcesObtained = thread.assignedResources;
+                services[serviceNo]->releaseResources(thread.threadNo, request.resourcesObtained);
+                services[serviceNo]->addToWaitingList(request, thread);
+            }
+        }
+    }
+
+    while (!services[serviceNo]->isWaitingListEmpty())
+    {
+        // scheduling the waiting requests once the required resources become available
+        PendingRequest penReq = services[serviceNo]->removeFromWaitingList();
+        resourcesFurtherRequired = penReq.request.resourcesRequired - penReq.request.resourcesObtained;
+        newResourcesObtained = services[serviceNo]->assignResourcesToWorkerThread(penReq.thread.threadNo, resourcesFurtherRequired);
+        penReq.request.resourcesObtained += newResourcesObtained;
+        services[serviceNo]->releaseResources(penReq.thread.threadNo, newResourcesObtained);
+        if (penReq.request.resourcesObtained == penReq.request.resourcesRequired)
+        {
+            // waiting is over request can be scheduled now
+            calculateWaitingAndTurnAroundTimeForRequest(penReq.request);
+            schedule.push_back(penReq.request);
+            services[serviceNo]->increaseAvailableResourcesBy(penReq.request.resourcesObtained);
+        }
+        else if (penReq.request.resourcesObtained < penReq.request.resourcesRequired)
+        {
+            waitingTime = clock() - penReq.request.arrivalTime;
+            if (waitingTime < timeout)
+            {
+                // request need to be rejected since it waiting time crossed the timeout and release any acquired resources
+                services[serviceNo]->addToWaitingList(penReq.request, penReq.thread);
             }
             else
             {
-                mappingStatus = mapRequestToThread(services[i]->threads, services[i]->getNumOfWorkerThreads(), request); // contains the mapped thread and waiting status
-                thread = mappingStatus.first;
-                isWaiting = mappingStatus.second;
-                services[i]->updateScheduleTable(request.requestNo, thread.threadNo); // schedule table is updated
-                if (isWaiting == false)
-                {
-                    // no wait request can be scheduled
-                    request.resourcesObtained = request.resourcesRequired;
-                    calculateWaitingAndTurnAroundTimeForRequest(request);
-                    schedule.push_back(request);
-                    services[i]->releaseResources(thread.threadNo, request.resourcesObtained);
-                    services[i]->increaseAvailableResourcesBy(request.resourcesObtained);
-                }
-                else if (isWaiting)
-                {
-                    // request need to wait till required resources become available
-                    request.resourcesObtained = thread.assignedResources;
-                    services[i]->releaseResources(thread.threadNo, request.resourcesObtained);
-                    services[i]->addToWaitingList(request, thread);
-                }
+                // still need to wait till some resources will become available
+                services[serviceNo]->updateScheduleTable(penReq.request.requestNo, -1);
+                services[serviceNo]->increaseAvailableResourcesBy(penReq.request.resourcesObtained);
+                rejectedRequests.push_back(penReq.request);
             }
         }
-
-        while (!services[i]->isWaitingListEmpty())
-        {
-            // scheduling the waiting requests once the required resources become available
-            PendingRequest penReq = services[i]->removeFromWaitingList();
-            resourcesFurtherRequired = penReq.request.resourcesRequired - penReq.request.resourcesObtained;
-            newResourcesObtained = services[i]->assignResourcesToWorkerThread(penReq.thread.threadNo, resourcesFurtherRequired);
-            penReq.request.resourcesObtained += newResourcesObtained;
-            services[i]->releaseResources(penReq.thread.threadNo, newResourcesObtained);
-            if (penReq.request.resourcesObtained == penReq.request.resourcesRequired)
-            {
-                // waiting is over request can be scheduled now
-                calculateWaitingAndTurnAroundTimeForRequest(penReq.request);
-                schedule.push_back(penReq.request);
-                services[i]->increaseAvailableResourcesBy(penReq.request.resourcesObtained);
-            }
-            else if (penReq.request.resourcesObtained < penReq.request.resourcesRequired)
-            {
-                waitingTime = clock() - penReq.request.arrivalTime;
-                if (waitingTime < timeout)
-                {
-                    // request need to be rejected since it waiting time crossed the timeout and release any acquired resources
-                    services[i]->addToWaitingList(penReq.request, penReq.thread);
-                }
-                else
-                {
-                    // still need to wait till some resources will become available
-                    services[i]->updateScheduleTable(penReq.request.requestNo, -1);
-                    services[i]->increaseAvailableResourcesBy(penReq.request.resourcesObtained);
-                    rejectedRequests.push_back(penReq.request);
-                }
-            }
-        }
-
-        displayScheduleDetails(i, schedule, rejectedRequests);
-        printScheduleTable(services[i]->getScheduleTable()); // printing the schedule table
     }
+
+    displayScheduleDetails(serviceNo, schedule, rejectedRequests);
+    printScheduleTable(services[serviceNo]->getScheduleTable()); // printing the schedule table
 }
 
 /**
